@@ -36,6 +36,15 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   I2cRegsIfc#(aw, dw, fifoDepth) r <- mkI2cRegs(
       I2cRegsCfg { slave: cfg.slave });
 
+  // 寄存器图说的是「写即压入、读即弹出」，那就得真有队列。原来 txdata 被
+  // 直接读、rxdata 直接publish 移位寄存器，fifoDepth 这个参数从 1 到 8
+  // 面积一动不动——价目表早就在说它什么也没改变。
+  //
+  // 两个队列都取无门控：first/deq 一旦带隐式条件，就会被提到整条规则头上，
+  // 而 accept 只在写方向才需要数据。守卫由规则自己写明。
+  FIFOF#(Bit#(8)) txq <- mkGSizedFIFOF(True, True, valueOf(fifoDepth));
+  FIFOF#(Bit#(8)) rxq <- mkGSizedFIFOF(True, True, valueOf(fifoDepth));
+
   Reg#(Phase)     ph    <- mkConfigReg(Idle);
   Reg#(Bit#(16))  div   <- mkReg(0);
   Reg#(Bit#(2))   quart <- mkReg(0);   // 一个位分四拍，好在中点采样
@@ -50,35 +59,54 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   Wire#(Bit#(1)) sdaIn <- mkBypassWire;
 
   Reg#(Bool) doAck   <- mkReg(False);
-  Reg#(Bool) cmdPend <- mkReg(False);
+  // 命令要粘住：写方向取不到数就得等，而脉冲只有一拍，等一拍就丢了。
+  // 口 0 归 accept 消费、口 1 归 mark 置位——消费必须排在置位之前，
+  // 反过来会让「总线 -> mark -> accept -> 总线」成环（G0095）。
+  Reg#(Bool) cmdRdy[2] <- mkCReg(2, False);
+  Reg#(Bool) cmdDly  <- mkReg(False);
+  Reg#(Bool) txPend  <- mkReg(False);
 
   // 一个寄存器里所有字段的 swmod 脉冲是同一个信号：它说的是「CMD 被写过」，
   // 不是「这一位被置上了」。位的新值要下一拍才落进寄存器，所以先记下写过，
   // 下一拍再看位。把脉冲当位用的话，任何一次写 CMD 都会走起始那一支，
   // wr / rd / stop / ack 四个位全都不起作用。
   rule mark;
-    cmdPend <= r.cmd_start_wr;
+    cmdDly <= r.cmd_start_wr;
+    if (cmdDly) cmdRdy[1] <= True;
+    txPend <= r.txdata_data_wr;
   endrule
 
-  rule accept (ph == Idle && r.ctrl_en == 1 && cmdPend);
+  // 压数单列一条规则。写在别处的分支里，队列的隐式条件会被提到整条规则头上。
+  rule pushTx (txPend && txq.notFull);
+    txq.enq(r.txdata_data);
+  endrule
+
+  // 软件读过 rxdata 就弹一个
+  rule popRx (r.rxdata_data_rd && rxq.notEmpty);
+    rxq.deq;
+  endrule
+
+  // 起始与写方向都要一个字节，读方向不要
+  Bool needsData = r.cmd_start == 1 || r.cmd_wr == 1;
+
+  rule accept (ph == Idle && r.ctrl_en == 1 && cmdRdy[0]
+               && (!needsData || txq.notEmpty));
+    cmdRdy[0] <= False;
+    if (needsData) txq.deq;
+    // 读的时候放手让从机驱动
+    sh <= needsData ? txq.first : 8'hFF;
+    quart <= 0;
+    div   <= r.presc;
+    irqf  <= False;
     if (r.cmd_start == 1) begin
-      ph    <= Start;
-      quart <= 0;
-      div   <= r.presc;
-      sh    <= r.txdata_data;
-      rdDir <= False;
-      irqf  <= False;
+      ph     <= Start;
+      rdDir  <= False;
       doStop <= False;
       doAck  <= False;
-    end else if (r.cmd_wr == 1 || r.cmd_rd == 1) begin
-      ph    <= Bit0;
-      bitn  <= 0;
-      quart <= 0;
-      div   <= r.presc;
-      // 读的时候放手让从机驱动
-      sh    <= (r.cmd_wr == 1) ? r.txdata_data : 8'hFF;
-      rdDir <= r.cmd_rd == 1;
-      irqf  <= False;
+    end else begin
+      ph     <= Bit0;
+      bitn   <= 0;
+      rdDir  <= r.cmd_rd == 1;
       doStop <= r.cmd_stop == 1;
       doAck  <= r.cmd_ack == 1;
     end
@@ -108,6 +136,8 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
           Ack: begin
             ph   <= doStop ? Stop : Idle;
             irqf <= True;
+            // 读回来的字节进队列，软件读 rxdata 时再弹
+            if (rdDir && rxq.notFull) rxq.enq(sh);
           end
           Stop: ph <= Idle;
         endcase
@@ -121,7 +151,7 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     r.status_tip_in(ph != Idle ? 1 : 0);
     r.status_busy_in(ph != Idle ? 1 : 0);
     r.status_rxack_in(ackIn);
-    r.rxdata_data_in(sh);
+    r.rxdata_data_in(rxq.notEmpty ? rxq.first : 0);
   endrule
 
   // 从机模式只多一件事：认自己的地址。总线仲裁与时钟延展留给后续版本。

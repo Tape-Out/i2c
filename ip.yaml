@@ -43,11 +43,8 @@ features:
       per: fifoDepth
 test:
   # 一个寄存器里所有字段的 swmod 脉冲是同一个信号，实现读其中一个就够，
-  # 其余是同一根线的别名。rxdata 的 swacc 要等真的接上收发队列才用得上
-  # ——现在 fifoDepth 这个参数也还没有对应的队列，一并记在任务单上。
+  # 其余是同一根线的别名。
   unused:
-  - txdata_data_wr
-  - rxdata_data_rd
   - cmd_ack_wr
   - cmd_wr_wr
   - cmd_rd_wr

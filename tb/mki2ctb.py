@@ -41,7 +41,8 @@ Bit#(8) rSTAT  = 8'h14;
 Bit#(8) txByte = 8'h{TXB:02X};
 Bit#(8) rxByte = 8'h{RXB:02X};
 
-typedef enum {{ Setup, Write, WrWait, WrCheck, Read, RdWait, RdCheck, Done }}
+typedef enum {{ Setup, Write, WrBusy, WrWait, WrCheck,
+               Read, RdBusy, RdWait, RdCheck, Done }}
   Phase deriving (Bits, Eq);
 
 (* synthesize *)
@@ -66,10 +67,11 @@ module mkI2c{label}Tb(Empty);
 
   // 从机什么时候拉低：写方向的第 9 位（应答），读方向按 rxByte 逐位送
   function Bit#(1) slavePull(Phase p, Bit#(4) e, Bit#(4) i);
-    if (p == WrWait) return (e >= 8) ? 1 : 0;
+    if (p == WrWait || p == WrBusy) return (e >= 8) ? 1 : 0;
     // 计数在上升沿就加过了，主机却在同一个高电平的后半拍才采——
     // 所以第八位采样时 e 已经是 8，写 e < 8 会让从机提前放手，末位读成 1
-    else if (p == RdWait) return (e <= 8 && rxByte[i] == 0) ? 1 : 0;
+    else if (p == RdWait || p == RdBusy)
+      return (e <= 8 && rxByte[i] == 0) ? 1 : 0;
     else return 0;
   endfunction
 
@@ -84,17 +86,17 @@ module mkI2c{label}Tb(Empty);
     if (d.irq) sawIrq[0] <= True;
     // 上升沿采样，下降沿换从机的数据——I2C 本来就是这么定的
     if (scl == 1 && sclPrv == 0) begin
-      if (ph == WrWait) begin
+      if (ph == WrWait || ph == WrBusy) begin
         if (edges[0] < 8) seen[0] <= {{seen[0][6:0], sda}};
         edges[0] <= edges[0] + 1;
-      end else if (ph == RdWait) begin
+      end else if (ph == RdWait || ph == RdBusy) begin
         // 第 9 位是主机的应答：它拉低才算 ACK
         if (edges[0] == 8) ackSeen[0] <= mp;
         edges[0] <= edges[0] + 1;
       end
     end
     // 进入位相那一下也是个下降沿，但第一位还没采过，这时候不能换数据
-    if (scl == 0 && sclPrv == 1 && ph == RdWait && edges[0] != 0
+    if (scl == 0 && sclPrv == 1 && (ph == RdWait || ph == RdBusy) && edges[0] != 0
         && sIdx[0] != 0) sIdx[0] <= sIdx[0] - 1;
   endrule
 
@@ -125,9 +127,17 @@ module mkI2c{label}Tb(Empty);
     case (s)
       0: wr(rTXD, zeroExtend(txByte));
       1: wr(rCMD, 32'h10);         // wr
-      default: begin ph <= WrWait; s <= 0; end
+      default: begin ph <= WrBusy; s <= 0; end
     endcase
     if (s < 2) s <= s + 1;
+  endrule
+
+  // 先等 busy 抬起来。直接等「busy 落下且 irqf 抬起」的话，上一帧留下的
+  // irqf 会让这一步当场成立——一次帧都没走就去检查了。
+  rule wrBusy (ph == WrBusy);
+    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,
+                                     wdata: 0, wstrb: 4'hF }});
+    if (x.rdata[6] == 1) ph <= WrWait;
   endrule
 
   rule wrWait (ph == WrWait);
@@ -164,9 +174,15 @@ module mkI2c{label}Tb(Empty);
     case (s)
       0: begin edges[1] <= 0; sIdx[1] <= 7; end
       1: wr(rCMD, 32'h28);         // rd + ack
-      default: begin ph <= RdWait; s <= 0; end
+      default: begin ph <= RdBusy; s <= 0; end
     endcase
     if (s < 2) s <= s + 1;
+  endrule
+
+  rule rdBusy (ph == RdBusy);
+    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,
+                                     wdata: 0, wstrb: 4'hF }});
+    if (x.rdata[6] == 1) ph <= RdWait;
   endrule
 
   rule rdWait (ph == RdWait);
