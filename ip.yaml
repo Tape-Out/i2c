@@ -34,6 +34,13 @@ features:
   slave:
     type: bool
     default: false
+    area:
+      points:
+        '1': 208.04
+        '2': 208.04
+        '4': 208.04
+        '8': 208.04
+      per: fifoDepth
 emit:
 - kind: bsv
   package: I2c
@@ -49,3 +56,58 @@ emit:
 deps:
   hwcore: ^0.1
   amba: ^0.1
+area:
+  base:
+    points:
+      '1': 941.92
+      '2': 941.92
+      '4': 941.92
+      '8': 941.92
+    per: fifoDepth
+  margin: 0.005
+  model: points-additive
+  error:
+    bound: 0.01
+    sign: over
+    note: parameter curves stored as measured points, features added on top, then
+      lifted by 0.005 so that no untested combination predicts under; the worst came
+      in -0.00 percent under before the lift
+  measured:
+  - at:
+      fifoDepth: 1
+      slave: false
+    um2: 941.92
+  - at:
+      fifoDepth: 2
+      slave: false
+    um2: 941.92
+  - at:
+      fifoDepth: 4
+      slave: false
+    um2: 941.92
+  - at:
+      fifoDepth: 8
+      slave: false
+    um2: 941.92
+  - at:
+      fifoDepth: 1
+      slave: true
+    um2: 1149.96
+  - at:
+      fifoDepth: 2
+      slave: true
+    um2: 1149.96
+  - at:
+      fifoDepth: 4
+      slave: true
+    um2: 1149.96
+  - at:
+      fifoDepth: 8
+      slave: true
+    um2: 1149.96
+  corner:
+    tool: ecc
+    pdk: ics55
+    freq_mhz: 100
+    measured: '2026-09-08'
+    gen_digest: sha256:bb3ce058bbf2b69d
