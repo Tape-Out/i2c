@@ -49,23 +49,19 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   Wire#(Bit#(1)) sclIn <- mkBypassWire;
   Wire#(Bit#(1)) sdaIn <- mkBypassWire;
 
-  Reg#(Bool) cStart <- mkReg(False);
-  Reg#(Bool) cWr    <- mkReg(False);
-  Reg#(Bool) cRd    <- mkReg(False);
-  Reg#(Bool) cStop  <- mkReg(False);
-  Reg#(Bool) cAck   <- mkReg(False);
+  Reg#(Bool) doAck   <- mkReg(False);
+  Reg#(Bool) cmdPend <- mkReg(False);
 
-  // swmod 的脉冲与寄存器的新值差一拍，先记脉冲、下一拍再看命令位
+  // 一个寄存器里所有字段的 swmod 脉冲是同一个信号：它说的是「CMD 被写过」，
+  // 不是「这一位被置上了」。位的新值要下一拍才落进寄存器，所以先记下写过，
+  // 下一拍再看位。把脉冲当位用的话，任何一次写 CMD 都会走起始那一支，
+  // wr / rd / stop / ack 四个位全都不起作用。
   rule mark;
-    cStart <= r.cmd_start_wr;
-    cWr    <= r.cmd_wr_wr;
-    cRd    <= r.cmd_rd_wr;
-    cStop  <= r.cmd_stop_wr;
-    cAck   <= r.cmd_ack_wr;
+    cmdPend <= r.cmd_start_wr;
   endrule
 
-  rule accept (ph == Idle && r.ctrl_en == 1);
-    if (cStart) begin
+  rule accept (ph == Idle && r.ctrl_en == 1 && cmdPend);
+    if (r.cmd_start == 1) begin
       ph    <= Start;
       quart <= 0;
       div   <= r.presc;
@@ -73,15 +69,18 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
       rdDir <= False;
       irqf  <= False;
       doStop <= False;
-    end else if (cWr || cRd) begin
+      doAck  <= False;
+    end else if (r.cmd_wr == 1 || r.cmd_rd == 1) begin
       ph    <= Bit0;
       bitn  <= 0;
       quart <= 0;
       div   <= r.presc;
-      sh    <= cWr ? r.txdata_data : 8'hFF;   // 读的时候放手让从机驱动
-      rdDir <= cRd;
+      // 读的时候放手让从机驱动
+      sh    <= (r.cmd_wr == 1) ? r.txdata_data : 8'hFF;
+      rdDir <= r.cmd_rd == 1;
       irqf  <= False;
-      doStop <= cStop;
+      doStop <= r.cmd_stop == 1;
+      doAck  <= r.cmd_ack == 1;
     end
   endrule
 
@@ -138,7 +137,9 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
         Idle:  return 0;
         Start: return (quart >= 1) ? 1 : 0;
         Bit0:  return (rdDir || sh[7] == 1) ? 0 : 1;
-        Ack:   return (rdDir && !cAck) ? 0 : (addressed ? 1 : 0);
+        // 读方向上 cmd.ack 说了要应答，主机就得把线拉低；不应答才放手。
+        // 原来两个分支都落到「不是从机就放手」，于是主机永远发不出应答。
+        Ack:   return rdDir ? (doAck ? 1 : 0) : (addressed ? 1 : 0);
         Stop:  return (quart >= 2) ? 0 : 1;
       endcase
     endmethod
