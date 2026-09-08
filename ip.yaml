@@ -1,0 +1,30 @@
+name: i2c
+version: 0.1.0
+spec: "0.1"
+kind: ip
+lang: bsv
+identity:
+  slug: i2c-tapeout-bsv
+  display_name: I2C controller
+  summary: I2C master and slave, seven and ten bit addressing.
+  category: peripheral
+  subcategories: [i2c]
+  ip_family: i2c
+  integration_profile: [apb4-slave]
+  maturity: planned
+contract:
+  version: 1
+  ctrl: { shape: flat, aw: 8, dw: 32 }
+  irq: [ { name: irq, kind: level } ]
+params:
+  fifoDepth: { type: int, default: 4, range: [1, 32] }
+features:
+  slave: { type: bool, default: false }
+  tenbit: { type: bool, default: false }
+emit:
+  - kind: bsv
+    package: I2c
+    module: mkI2c
+    config_type: I2cCfg
+    interface: I2cIfc
+deps: { hwcore: "^0.1" }

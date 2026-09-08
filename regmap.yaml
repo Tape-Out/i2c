@@ -1,0 +1,48 @@
+ip: i2c
+contract: { aw: 8, dw: 32 }
+base: 0x10006000
+size: 0x100
+params: [fifoDepth]
+regs:
+  - name: presc
+    offset: 0x00
+    desc: clock prescaler
+    fields: [ { name: val, width: 16, sw: rw, hw: r, reset: 0 } ]
+  - name: ctrl
+    offset: 0x04
+    desc: control
+    fields:
+      - { name: en,  bits: "7:7", sw: rw, hw: r, reset: 0 }
+      - { name: ien, bits: "6:6", sw: rw, hw: r, reset: 0 }
+  - name: txdata
+    offset: 0x08
+    desc: transmit, write pushes
+    fields:
+      - { name: data, bits: "7:0", sw: w, hw: r, swmod: true }
+  - name: rxdata
+    offset: 0x0C
+    desc: receive, read pops
+    fields:
+      - { name: data, bits: "7:0", sw: r, hw: w, volatile: true, swacc: true }
+  - name: cmd
+    offset: 0x10
+    desc: command, write triggers
+    fields:
+      - { name: ack,   bits: "3:3", sw: w, hw: r, swmod: true }
+      - { name: wr,    bits: "4:4", sw: w, hw: r, swmod: true }
+      - { name: rd,    bits: "5:5", sw: w, hw: r, swmod: true }
+      - { name: stop,  bits: "6:6", sw: w, hw: r, swmod: true }
+      - { name: start, bits: "7:7", sw: w, hw: r, swmod: true }
+  - name: status
+    offset: 0x14
+    desc: status, all from hardware
+    fields:
+      - { name: irqf,  bits: "0:0", sw: r, hw: w, volatile: true }
+      - { name: tip,   bits: "1:1", sw: r, hw: w, volatile: true }
+      - { name: busy,  bits: "6:6", sw: r, hw: w, volatile: true }
+      - { name: rxack, bits: "7:7", sw: r, hw: w, volatile: true }
+  - name: saddr
+    offset: 0x18
+    desc: slave address
+    feature: slave
+    fields: [ { name: val, bits: "9:0", sw: rw, hw: r, reset: 0 } ]
