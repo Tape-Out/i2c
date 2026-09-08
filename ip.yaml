@@ -36,14 +36,12 @@ features:
     default: false
     area:
       points:
-        '1': 208.04
-        '2': 208.04
-        '4': 208.04
-        '8': 208.04
+        '1': 132.16
+        '2': 85.68
+        '4': 121.8
+        '8': 139.44
       per: fifoDepth
 test:
-  # 一个寄存器里所有字段的 swmod 脉冲是同一个信号，实现读其中一个就够，
-  # 其余是同一根线的别名。
   unused:
   - cmd_ack_wr
   - cmd_wr_wr
@@ -67,55 +65,55 @@ deps:
 area:
   base:
     points:
-      '1': 941.92
-      '2': 941.92
-      '4': 941.92
-      '8': 941.92
+      '1': 1195.04
+      '2': 1503.04
+      '4': 2023.56
+      '8': 2905.0
     per: fifoDepth
-  margin: 0.005
+  margin: 0.0227
   model: points-additive
   error:
-    bound: 0.01
+    bound: 0.033
     sign: over
     note: parameter curves stored as measured points, features added on top, then
-      lifted by 0.005 so that no untested combination predicts under; the worst came
-      in -0.00 percent under before the lift
+      lifted by 0.0227 so that no untested combination predicts under; the worst came
+      in 1.77 percent under before the lift
   measured:
   - at:
       fifoDepth: 1
       slave: false
-    um2: 941.92
+    um2: 1195.04
   - at:
       fifoDepth: 2
       slave: false
-    um2: 941.92
+    um2: 1503.04
   - at:
       fifoDepth: 4
       slave: false
-    um2: 941.92
+    um2: 2023.56
   - at:
       fifoDepth: 8
       slave: false
-    um2: 941.92
+    um2: 2905.0
   - at:
       fifoDepth: 1
       slave: true
-    um2: 1149.96
+    um2: 1327.2
   - at:
       fifoDepth: 2
       slave: true
-    um2: 1149.96
+    um2: 1588.72
   - at:
       fifoDepth: 4
       slave: true
-    um2: 1149.96
+    um2: 2145.36
   - at:
       fifoDepth: 8
       slave: true
-    um2: 1149.96
+    um2: 3044.44
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-08'
-    gen_digest: sha256:bb3ce058bbf2b69d
+    measured: '2026-09-09'
+    gen_digest: sha256:2248a519f3ba7581
