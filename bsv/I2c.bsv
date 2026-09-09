@@ -31,7 +31,7 @@ typedef enum { Idle, Start, Bit0, Ack, Stop } Phase deriving (Bits, Eq, FShow);
 
 module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     provisos (Mul#(TDiv#(dw, 8), 8, dw), Add#(_a, 8, aw), Add#(_b, 16, dw),
-              Add#(_c, 1, dw), Add#(_d, 8, dw), Add#(_e, 10, dw));
+              Add#(_c, 1, dw), Add#(_d, 8, dw), Add#(_e, 7, dw));
 
   I2cRegsIfc#(aw, dw, fifoDepth) r <- mkI2cRegs(
       I2cRegsCfg { slave: cfg.slave });
@@ -54,6 +54,9 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   Reg#(Bool)      rdDir <- mkReg(False);
   Reg#(Bool)      doStop <- mkReg(False);
   Reg#(Bool)      irqf  <- mkReg(False);
+  // 「总线忙」不等于「正在传一个字节」：规范说起始之后总线就忙，直到停止。
+  // 两件事分别是状态寄存器的 BUSY 与 TIP，原来两位驱动的是同一个表达式。
+  Reg#(Bool)      busyR <- mkReg(False);
 
   Wire#(Bit#(1)) sclIn <- mkBypassWire;
   Wire#(Bit#(1)) sdaIn <- mkBypassWire;
@@ -100,9 +103,15 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     irqf  <= False;
     if (r.cmd_start == 1) begin
       ph     <= Start;
+      busyR  <= True;             // 起始一发出，总线就算忙
       rdDir  <= False;
       doStop <= False;
       doAck  <= False;
+    end else if (r.cmd_stop == 1 && r.cmd_wr == 0 && r.cmd_rd == 0) begin
+      // 只下停止：就发一个停止条件。原来这一支也走位相，于是白发一个字节
+      // 加一个应答位，线上多出九个时钟。
+      ph     <= Stop;
+      doStop <= True;
     end else begin
       ph     <= Bit0;
       bitn   <= 0;
@@ -112,8 +121,13 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     end
   endrule
 
+  // 放开 SCL 的那几个四分之一拍里，线要是还低着，就是从机在按着不放。
+  // 规范允许从机这么做（3.1.9），主机必须等——时间不走。
+  Bool releasing = (ph == Start) || quart == 1 || quart == 2;
+  Bool stretched = releasing && sclIn == 0;
+
   // 四分之一位一步：0 拉低 SCL 换数据，1 放开 SCL，2 采样，3 再拉低
-  rule run (ph != Idle && r.ctrl_en == 1);
+  rule run (ph != Idle && r.ctrl_en == 1 && !stretched);
     if (div != 0)
       div <= div - 1;
     else begin
@@ -139,7 +153,7 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
             // 读回来的字节进队列，软件读 rxdata 时再弹
             if (rdDir && rxq.notFull) rxq.enq(sh);
           end
-          Stop: ph <= Idle;
+          Stop: begin ph <= Idle; busyR <= False; end
         endcase
       end
     end
@@ -149,7 +163,7 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   rule status;
     r.status_irqf_in(irqf ? 1 : 0);
     r.status_tip_in(ph != Idle ? 1 : 0);
-    r.status_busy_in(ph != Idle ? 1 : 0);
+    r.status_busy_in(busyR ? 1 : 0);
     r.status_rxack_in(ackIn);
     r.rxdata_data_in(rxq.notEmpty ? rxq.first : 0);
   endrule
@@ -160,12 +174,19 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
 
   interface regs = r.regs;
   interface I2cPins pins;
-    // 起始是 SCL 高时拉低 SDA，停止是 SCL 高时放开 SDA
-    method Bit#(1) scl_pull = (ph == Idle || quart == 1 || quart == 2) ? 0 : 1;
+    // 起始是 SCL 高时拉低 SDA，停止是 SCL 高时放开 SDA。
+    // 起始那一相整相不拉 SCL：原来 SDA 的下降与 SCL 的上升撞在同一个边界，
+    // 接收方根本看不到起始——规范要求 SDA 在 SCL 已经稳定为高时才下降。
+    // 三处「放开 SCL」：总线空着的时候 · 起始那一相全程 · 停止之后留在高位。
+    // 「总线还忙就把 SCL 留在低位」这一条是必须的：原来每传完一个字节都回
+    // Idle 把 SCL 放回高位，下一个字节再拉低——从机看到的是多出来的一个时钟。
+    method Bit#(1) scl_pull =
+      ((ph == Idle && !busyR) || ph == Start || (ph == Stop && quart != 0)
+       || quart == 1 || quart == 2) ? 0 : 1;
     method Bit#(1) sda_pull;
       case (ph)
         Idle:  return 0;
-        Start: return (quart >= 1) ? 1 : 0;
+        Start: return (quart >= 2) ? 1 : 0;
         Bit0:  return (rdDir || sh[7] == 1) ? 0 : 1;
         // 读方向上 cmd.ack 说了要应答，主机就得把线拉低；不应答才放手。
         // 原来两个分支都落到「不是从机就放手」，于是主机永远发不出应答。

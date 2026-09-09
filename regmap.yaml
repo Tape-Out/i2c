@@ -45,4 +45,5 @@ regs:
     offset: 0x18
     desc: slave address
     feature: slave
-    fields: [ { name: val, bits: "9:0", sw: rw, hw: r, reset: 0 } ]
+    # 只比七位：十位地址（规范 3.1.11）本版不支持，宽十位的字段是假象
+    fields: [ { name: val, bits: "6:0", sw: rw, hw: r, reset: 0 } ]

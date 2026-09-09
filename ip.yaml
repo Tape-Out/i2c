@@ -36,10 +36,10 @@ features:
     default: false
     area:
       points:
-        '1': 132.16
-        '2': 85.68
-        '4': 121.8
-        '8': 139.44
+        '1': 55.16
+        '2': 113.68
+        '4': 142.52
+        '8': 181.44
       per: fifoDepth
 test:
   unused:
@@ -65,55 +65,55 @@ deps:
 area:
   base:
     points:
-      '1': 1195.04
-      '2': 1503.04
-      '4': 2023.56
-      '8': 2905.0
+      '1': 1245.44
+      '2': 1456.56
+      '4': 2011.24
+      '8': 2906.4
     per: fifoDepth
   margin: 0.0227
   model: points-additive
   error:
     bound: 0.033
     sign: over
-    note: parameter curves stored as measured points, features added on top, then
-      lifted by 0.0227 so that no untested combination predicts under; the worst came
-      in 1.77 percent under before the lift
+    note: parameter curves stored as measured points, features added on top, 
+      then lifted by 0.0227 so that no untested combination predicts under; the 
+      worst came in 1.77 percent under before the lift
   measured:
   - at:
       fifoDepth: 1
       slave: false
-    um2: 1195.04
+    um2: 1245.44
   - at:
       fifoDepth: 2
       slave: false
-    um2: 1503.04
+    um2: 1456.56
   - at:
       fifoDepth: 4
       slave: false
-    um2: 2023.56
+    um2: 2011.24
   - at:
       fifoDepth: 8
       slave: false
-    um2: 2905.0
+    um2: 2906.4
   - at:
       fifoDepth: 1
       slave: true
-    um2: 1327.2
+    um2: 1300.6
   - at:
       fifoDepth: 2
       slave: true
-    um2: 1588.72
+    um2: 1570.24
   - at:
       fifoDepth: 4
       slave: true
-    um2: 2145.36
+    um2: 2153.76
   - at:
       fifoDepth: 8
       slave: true
-    um2: 3044.44
+    um2: 3087.84
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-09'
-    gen_digest: sha256:2248a519f3ba7581
+    measured: '2026-09-10'
+    gen_digest: sha256:b291bdb4249d5877
