@@ -91,33 +91,43 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
 
   // 起始与写方向都要一个字节，读方向不要
   Bool needsData = r.cmd_start == 1 || r.cmd_wr == 1;
+  // 这一次写 cmd 到底有没有下命令。命令寄存器的 swmod 脉冲是**寄存器级**的，
+  // 说的只是「cmd 被写过」——不问这一句，一次纯粹的中断应答会白发九个时钟
+  // 加一个 0xFF 的字节到总线上。
+  Bool anyCmd = r.cmd_start == 1 || r.cmd_wr == 1
+                || r.cmd_rd == 1 || r.cmd_stop == 1;
 
   rule accept (ph == Idle && r.ctrl_en == 1 && cmdRdy[0]
                && (!needsData || txq.notEmpty));
     cmdRdy[0] <= False;
-    if (needsData) txq.deq;
-    // 读的时候放手让从机驱动
-    sh <= needsData ? txq.first : 8'hFF;
-    quart <= 0;
-    div   <= r.presc;
-    irqf  <= False;
-    if (r.cmd_start == 1) begin
-      ph     <= Start;
-      busyR  <= True;             // 起始一发出，总线就算忙
-      rdDir  <= False;
-      doStop <= False;
-      doAck  <= False;
-    end else if (r.cmd_stop == 1 && r.cmd_wr == 0 && r.cmd_rd == 0) begin
-      // 只下停止：就发一个停止条件。原来这一支也走位相，于是白发一个字节
-      // 加一个应答位，线上多出九个时钟。
-      ph     <= Stop;
-      doStop <= True;
+    if (!anyCmd) begin
+      // 只写了应答位：清标志，别的什么也不做
+      if (r.cmd_iack == 1) irqf <= False;
     end else begin
-      ph     <= Bit0;
-      bitn   <= 0;
-      rdDir  <= r.cmd_rd == 1;
-      doStop <= r.cmd_stop == 1;
-      doAck  <= r.cmd_ack == 1;
+      if (needsData) txq.deq;
+      // 读的时候放手让从机驱动
+      sh <= needsData ? txq.first : 8'hFF;
+      quart <= 0;
+      div   <= r.presc;
+      irqf  <= False;
+      if (r.cmd_start == 1) begin
+        ph     <= Start;
+        busyR  <= True;             // 起始一发出，总线就算忙
+        rdDir  <= False;
+        doStop <= False;
+        doAck  <= False;
+      end else if (r.cmd_stop == 1 && r.cmd_wr == 0 && r.cmd_rd == 0) begin
+        // 只下停止：就发一个停止条件。原来这一支也走位相，于是白发一个字节
+        // 加一个应答位，线上多出九个时钟。
+        ph     <= Stop;
+        doStop <= True;
+      end else begin
+        ph     <= Bit0;
+        bitn   <= 0;
+        rdDir  <= r.cmd_rd == 1;
+        doStop <= r.cmd_stop == 1;
+        doAck  <= r.cmd_ack == 1;
+      end
     end
   endrule
 
@@ -153,7 +163,9 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
             // 读回来的字节进队列，软件读 rxdata 时再弹
             if (rdDir && rxq.notFull) rxq.enq(sh);
           end
-          Stop: begin ph <= Idle; busyR <= False; end
+          // 停止也是一次完成。原来只有应答相置 irqf，于是「只下停止」那条命令
+          // 从不产生完成中断——软件等不到事务真正结束的那一下。
+          Stop: begin ph <= Idle; busyR <= False; irqf <= True; end
         endcase
       end
     end

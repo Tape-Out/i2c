@@ -42,7 +42,8 @@ Bit#(8) txByte = 8'h{TXB:02X};
 Bit#(8) rxByte = 8'h{RXB:02X};
 
 typedef enum {{ Setup, Write, WrBusy, WrWait, WrCheck,
-               Read, RdBusy, RdWait, RdCheck, Stop_, StWait, Done }}
+               Read, RdBusy, RdWait, RdCheck, Stop_, StWait,
+               Iack, IackCheck, Done }}
   Phase deriving (Bits, Eq);
 
 (* synthesize *)
@@ -262,7 +263,42 @@ module mkI2c{label}Tb(Empty);
   rule stWait (ph == StWait);
     let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,
                                      wdata: 0, wstrb: 4'hF }});
-    if (x.rdata[6] == 0) ph <= Done;
+    if (x.rdata[6] == 0) begin ph <= Iack; s <= 0; end
+  endrule
+
+  // 一次以停止收尾的传输之后中断标志还举着，而唯一能清它的动作是**再下一条命令**
+  // ——那等于「想关掉中断就得再发一次总线事务」。开了 ien 的话中断一直举着，
+  // 服务程序退不出去。OpenCores 那一套里 cmd 的第 0 位是应答位，写 1 清标志；
+  // 我们的第 0 位正好空着。
+  //
+  // 还要顺带验一件事：只写应答位**不许在线上多发一个字节**。命令寄存器的 swmod
+  // 脉冲是寄存器级的（说的是「cmd 被写过」），落到取指那一支就会白发九个时钟，
+  // 而末尾那条「一共 19 个时钟」的判据正好会把它逮住。
+  rule iack (ph == Iack);
+    case (s)
+      0: action
+           let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,
+                                            wdata: 0, wstrb: 4'hF }});
+           if (x.rdata[0] == 0) begin
+             $display("FAIL the transfer finished but irqf never rose");
+             bad <= True;
+           end
+         endaction
+      1: wr(rCMD, 32'h01);         // 只写应答位
+      default: noAction;
+    endcase
+    if (s > 60) begin ph <= IackCheck; s <= 0; end
+    else s <= s + 1;
+  endrule
+
+  rule iackCheck (ph == IackCheck);
+    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,
+                                     wdata: 0, wstrb: 4'hF }});
+    if (x.rdata[0] == 1) begin
+      $display("FAIL writing the acknowledge bit left irqf set");
+      bad <= True;
+    end
+    ph <= Done;
   endrule
 
   rule fin (ph == Done);
@@ -284,7 +320,8 @@ module mkI2c{label}Tb(Empty);
     end
     if (wrong) $display("FAILED");
     else $display("PASS i2c: start and stop on the wire, a byte out, a byte in, "
-                  + "the ack is sent, and a stretched clock is honoured");
+                  + "the ack is sent, a stretched clock is honoured, and the "
+                  + "interrupt flag can be cleared without another transfer");
     $finish(wrong ? 1 : 0);
   endrule
 endmodule

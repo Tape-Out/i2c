@@ -28,6 +28,9 @@ regs:
     offset: 0x10
     desc: command, write triggers
     fields:
+      # 第 0 位是中断应答：写 1 清掉状态里的 irqf。没有它，清中断的唯一办法
+      # 是再下一条命令——等于「想关中断就得再发一次总线事务」。
+      - { name: iack,  bits: "0:0", sw: w, hw: r }
       - { name: ack,   bits: "3:3", sw: w, hw: r, swmod: true }
       - { name: wr,    bits: "4:4", sw: w, hw: r, swmod: true }
       - { name: rd,    bits: "5:5", sw: w, hw: r, swmod: true }
