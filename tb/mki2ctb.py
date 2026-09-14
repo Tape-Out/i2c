@@ -7,6 +7,10 @@
 分频取 0，一个位就是四拍：拉低换数据、放开、采样、再拉低。SCL 的上升沿是
 采样点，测试台按上升沿数位。
 
+后半段是多主控（UM10204 3.1.8）：测试台再扮一个主控，先占住总线，看我们的 `busy`
+跟不跟线、起始等不等总线空闲、tBUF 够不够；再在第五位上把 SDA 拉低，看我们认不认输、
+放不放手、`al` 置没置，下一次起始清没清。
+
 认矩阵：`fifoDepth` 与 `slave` 从这一点的旋钮来。
 """
 import json
@@ -23,9 +27,15 @@ slave = bool(k.get("slave", False))
 
 TXB = 0xA5      # 发出去的那个字节，故意不对称：循环移位错一位就看得出来
 RXB = 0x3C      # 从机送回来的
+PSLOW = 99     # 量 tBUF 时的分频：一个位 4 × (PSLOW + 1) 拍
+BIT = 4 * (PSLOW + 1)
+GAPMIN = -(-52 * BIT // 100)   # tBUF 至少 0.52 个位（快速模式 1.3 µs 对 2.5 µs）
+
+MULTI = '\n  // ---- 多主控（UM10204 3.1.8）----\n  // 原有那几条的计数只对单主控那一段成立，在这里先查掉，后面的起始停止另算\n  rule count_ (ph == Count);\n    Bool wrong = False;\n    // 起始是「SCL 稳定为高时 SDA 下降」，停止是同样条件下的上升。\n    // 原来 SDA 的下降与 SCL 的上升撞在同一个边界上，线上一次起始都没有。\n    if (starts[1] != 1) begin\n      $display("FAIL saw %0d start conditions on the wire, want 1", starts[1]);\n      wrong = True;\n    end\n    if (stops[1] != 1) begin\n      $display("FAIL saw %0d stop conditions on the wire, want 1", stops[1]);\n      wrong = True;\n    end\n    // 只下停止的那条命令不该再发一个字节。它发了的话这里多九个脉冲。\n    if (allEdges[1] != 19) begin\n      $display("FAIL saw %0d clock pulses on the wire, want 19", allEdges[1]);\n      wrong = True;\n    end\n    if (wrong) bad <= True;\n    ph <= BusA;\n  endrule\n\n  // 另一个主控发起始：SCL 高着，它把 SDA 拉低。线上从此是忙的，而我们什么也没做\n  rule busA (ph == BusA);\n    oSda[1] <= True;\n    ph <= BusW;\n    s  <= 0;\n  endrule\n\n  rule busW (ph == BusW);\n    if (s < 20) s <= s + 1; else ph <= BusB;\n  endrule\n\n  rule busB (ph == BusB);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    if (x.rdata[6] != 1) begin\n      $display("FAIL another controller started a transfer but status.busy reads 0");\n      bad <= True;\n    end\n    ph <= BusC;\n    s  <= 0;\n  endrule\n\n  // 这时软件下起始命令：总线不空，不许动（3.1.8：只有总线空闲才许起始）。\n  // 分频取 99，一个位 400 拍，下面量 tBUF 时装帧那一两拍可以忽略\n  rule busC (ph == BusC);\n    case (s)\n      0: wr(rPRESC, {PSLOW});\n      1: wr(rTXD, 32\'h5A);\n      2: begin wr(rCMD, 32\'h80); pulled[1] <= False; edgeMark <= allEdges[1]; end\n      default: begin ph <= BusD; end\n    endcase\n    if (s < 3) s <= s + 1; else s <= 0;\n  endrule\n\n  rule busD (ph == BusD);\n    if (s < 2000) s <= s + 1;\n    else begin\n      if (pulled[1]) begin\n        $display("FAIL our controller drove the bus while another controller held it");\n        bad <= True;\n      end\n      oSda[1] <= False;               // 另一个主控发停止\n      ph <= BusE;\n      s  <= 0;\n    end\n  endrule\n\n  // 等我们的起始加一个字节走完。定长等待而不是轮询：旧实现早就发过了，\n  // 轮询 tip 会卡住，后面的判据就一条也跑不到\n  rule busE (ph == BusE);\n    if (s < 6000) s <= s + 1; else ph <= BusF;\n  endrule\n\n  rule busF (ph == BusF);\n    Bool wrong = False;\n    if (gapFree[1] < {GAPMIN}) begin\n      $display("FAIL the bus was free for only %0d cycles between the other controller\'s stop and our start, under tBUF (0.52 of a {BIT}-cycle bit)", gapFree[1]);\n      wrong = True;\n    end\n    // 这是本台第二次起始。前一个字节把位计数留在 7 的话，起始之后只发一位就进应答\n    if (allEdges[1] - edgeMark != 9) begin\n      $display("FAIL a start after an earlier transfer clocked out %0d pulses, want 9 (eight bits and the acknowledge)", allEdges[1] - edgeMark);\n      wrong = True;\n    end\n    if (wrong) bad <= True;\n    ph <= BusG;\n    s  <= 0;\n  endrule\n\n  rule busG (ph == BusG);\n    wr(rCMD, 32\'h40);                 // 自己的停止\n    ph <= BusH;\n  endrule\n\n  rule busH (ph == BusH);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    if (x.rdata[6] == 0) begin ph <= ArbA; s <= 0; end\n  endrule\n\n  // 仲裁：我们发 0xFF，另一个主控从第五位起把 SDA 拉低。我们想发 1、线上是 0，\n  // 就是输了：必须放开 SDA 与 SCL，置 al 与 irqf\n  rule arbA (ph == ArbA);\n    case (s)\n      0: wr(rPRESC, 0);\n      1: wr(rTXD, 32\'hFF);\n      2: begin wr(rCMD, 32\'h80); arm[1] <= True; aEdges[1] <= 0; end\n      default: begin ph <= ArbB; end\n    endcase\n    if (s < 3) s <= s + 1; else s <= 0;\n  endrule\n\n  rule arbB (ph == ArbB);\n    if (s < 400) s <= s + 1;\n    else begin\n      if (pullNow[1] != 0) begin\n        $display("FAIL our controller kept driving the bus after losing arbitration: scl_pull sda_pull = %b", pullNow[1]);\n        bad <= True;\n      end\n      ph <= ArbC;\n    end\n  endrule\n\n  rule arbC (ph == ArbC);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    Bool wrong = False;\n    if (x.rdata[5] != 1) begin\n      $display("FAIL arbitration was lost on the fifth bit but status.al reads 0");\n      wrong = True;\n    end\n    if (x.rdata[0] != 1) begin\n      $display("FAIL arbitration was lost but irqf is not set");\n      wrong = True;\n    end\n    if (x.rdata[6] != 1) begin\n      $display("FAIL the other controller still holds the bus but busy reads 0");\n      wrong = True;\n    end\n    if (wrong) bad <= True;\n    ph <= ArbD;\n  endrule\n\n  // 另一个主控发停止；总线闲下来，我们重新起始，al 要清掉\n  rule arbD (ph == ArbD);\n    oSda[1] <= False;\n    arm[1]  <= False;\n    ph <= ArbE;\n    s  <= 0;\n  endrule\n\n  rule arbE (ph == ArbE);\n    if (s < 20) s <= s + 1; else ph <= ArbF;\n  endrule\n\n  rule arbF (ph == ArbF);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    if (x.rdata[6] != 0) begin\n      $display("FAIL the other controller sent a stop but busy still reads 1");\n      bad <= True;\n    end\n    ph <= ArbG;\n    s  <= 0;\n  endrule\n\n  rule arbG (ph == ArbG);\n    case (s)\n      0: wr(rTXD, 32\'h5A);\n      1: wr(rCMD, 32\'h80);\n      default: begin ph <= ArbH; end\n    endcase\n    if (s < 2) s <= s + 1; else s <= 0;\n  endrule\n\n  rule arbH (ph == ArbH);\n    if (s < 40) s <= s + 1; else ph <= ArbI;\n  endrule\n\n  rule arbI (ph == ArbI);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    if (x.rdata[5] != 0) begin\n      $display("FAIL status.al is still set after a new start command");\n      bad <= True;\n    end\n    ph <= ArbJ;\n    s  <= 0;\n  endrule\n\n  rule arbJ (ph == ArbJ);\n    if (s < 200) s <= s + 1;\n    else begin wr(rCMD, 32\'h40); ph <= ArbK; end\n  endrule\n\n  rule arbK (ph == ArbK);\n    let x <- d.regs.access(RegReq {{ addr: rSTAT, write: False,\n                                     wdata: 0, wstrb: 4\'hF }});\n    if (x.rdata[6] == 0) ph <= Done;\n  endrule\n'.format(PSLOW=PSLOW, BIT=BIT, GAPMIN=GAPMIN)
 
 txt = f'''package I2c{label}Tb;
 
+import ConfigReg::*;
 import RegIf::*;
 import I2c::*;
 
@@ -43,7 +53,8 @@ Bit#(8) rxByte = 8'h{RXB:02X};
 
 typedef enum {{ Setup, Write, WrBusy, WrWait, WrCheck,
                Read, RdBusy, RdWait, RdCheck, Stop_, StWait,
-               Iack, IackCheck, Done }}
+               Iack, IackCheck, Count, BusA, BusW, BusB, BusC, BusD, BusE, BusF, BusG, BusH,
+               ArbA, ArbB, ArbC, ArbD, ArbE, ArbF, ArbG, ArbH, ArbI, ArbJ, ArbK, Done }}
   Phase deriving (Bits, Eq);
 
 (* synthesize *)
@@ -51,8 +62,9 @@ module mkI2c{label}Tb(Empty);
   I2cIfc#(8, 32, {depth}) d <- mkI2c(I2cCfg {{ slave: {"True" if slave else "False"} }});
 
   Reg#(Phase)    ph  <- mkReg(Setup);
-  Reg#(Bit#(8))  s   <- mkReg(0);
-  Reg#(Bit#(32)) cyc <- mkReg(0);
+  Reg#(Bit#(16)) s   <- mkReg(0);
+  // 线上那条规则也读它：普通寄存器会与各阶段规则绕成环，把计拍的规则整条挡掉
+  Reg#(Bit#(32)) cyc <- mkConfigReg(0);
   Reg#(Bool)     bad <- mkReg(False);
 
   // 线上采到的位与已经数过的上升沿
@@ -79,6 +91,16 @@ module mkI2c{label}Tb(Empty);
   // 上升沿更新的，直接拿来驱动就等于在高电平期间动 SDA，那正是起始/停止的
   // 定义，判据会把它数进去。
   Reg#(Bit#(1))  sPull   <- mkReg(0);
+  // 另一个主控：它拉不拉 SDA；武装以后数我们的上升沿，第四个之后在低电平里拉低
+  Reg#(Bool)     oSda[2]    <- mkCReg(2, False);
+  Reg#(Bool)     arm[2]     <- mkCReg(2, False);
+  Reg#(Bit#(8))  aEdges[2]  <- mkCReg(2, 0);
+  // 我们拉过线没有、这一拍拉着什么、上一次停止到这一次起始隔了几拍
+  Reg#(Bool)     pulled[2]  <- mkCReg(2, False);
+  Reg#(Bit#(2))  pullNow[2] <- mkCReg(2, 0);
+  Reg#(Bit#(32)) gapFree[2] <- mkCReg(2, 0);
+  Reg#(Bit#(32)) tStop      <- mkReg(0);
+  Reg#(Bit#(8))  edgeMark   <- mkReg(0);
 
   // 从机什么时候拉低：写方向的第 9 位（应答），读方向按 rxByte 逐位送
   function Bit#(1) slavePull(Phase p, Bit#(4) e, Bit#(4) i);
@@ -93,7 +115,7 @@ module mkI2c{label}Tb(Empty);
   rule wire_;
     Bit#(1) mp = d.pins.sda_pull;
     Bit#(1) sp = slavePull(ph, edges[0], sIdx[0]);
-    Bit#(1) sda = (mp == 1 || sPull == 1) ? 0 : 1;
+    Bit#(1) sda = (mp == 1 || sPull == 1 || oSda[0]) ? 0 : 1;
     // 写方向数到第三位时，从机把 SCL 按住几拍——规范允许，主机必须等。
     // 必须从**主机自己拉低的那一拍**开始按：中途去按会先造一个假的下降沿，
     // 放手时再造一个假的上升沿，测试台把它数成一位，字节就错了。
@@ -110,10 +132,19 @@ module mkI2c{label}Tb(Empty);
     sdaPrv <= sda;
     // SCL 稳定为高时 SDA 才动，那就是起始（下降）或停止（上升）
     if (scl == 1 && sclPrv == 1 && sda != sdaPrv) begin
-      if (sda == 0) starts[0] <= starts[0] + 1;
-      else          stops[0]  <= stops[0] + 1;
+      if (sda == 0) begin
+        starts[0] <= starts[0] + 1;
+        gapFree[0] <= cyc - tStop;
+      end else begin
+        stops[0] <= stops[0] + 1;
+        tStop <= cyc;
+      end
     end
     if (d.irq) sawIrq[0] <= True;
+    pullNow[0] <= {{d.pins.scl_pull, mp}};
+    if (d.pins.scl_pull == 1 || mp == 1) pulled[0] <= True;
+    if (arm[0] && scl == 1 && sclPrv == 0) aEdges[0] <= aEdges[0] + 1;
+    if (arm[0] && aEdges[0] >= 4 && scl == 0) oSda[0] <= True;
     // 上升沿采样，下降沿换从机的数据——I2C 本来就是这么定的
     if (scl == 1 && sclPrv == 0) allEdges[0] <= allEdges[0] + 1;
     if (scl == 1 && sclPrv == 0) begin
@@ -133,7 +164,7 @@ module mkI2c{label}Tb(Empty);
 
   rule tick;
     cyc <= cyc + 1;
-    if (cyc > 40000) begin
+    if (cyc > 200000) begin
       $display("TIMEOUT in phase %0d", pack(ph));
       $finish(1);
     end
@@ -298,30 +329,16 @@ module mkI2c{label}Tb(Empty);
       $display("FAIL writing the acknowledge bit left irqf set");
       bad <= True;
     end
-    ph <= Done;
+    ph <= Count;
   endrule
-
+{MULTI}
   rule fin (ph == Done);
     Bool wrong = bad;
-    // 起始是「SCL 稳定为高时 SDA 下降」，停止是同样条件下的上升。
-    // 原来 SDA 的下降与 SCL 的上升撞在同一个边界上，线上一次起始都没有。
-    if (starts[1] != 1) begin
-      $display("FAIL saw %0d start conditions on the wire, want 1", starts[1]);
-      wrong = True;
-    end
-    if (stops[1] != 1) begin
-      $display("FAIL saw %0d stop conditions on the wire, want 1", stops[1]);
-      wrong = True;
-    end
-    // 只下停止的那条命令不该再发一个字节。它发了的话这里多九个脉冲。
-    if (allEdges[1] != 19) begin
-      $display("FAIL saw %0d clock pulses on the wire, want 19", allEdges[1]);
-      wrong = True;
-    end
     if (wrong) $display("FAILED");
     else $display("PASS i2c: start and stop on the wire, a byte out, a byte in, "
-                  + "the ack is sent, a stretched clock is honoured, and the "
-                  + "interrupt flag can be cleared without another transfer");
+                  + "the ack is sent, a stretched clock is honoured, the "
+                  + "interrupt flag can be cleared without another transfer, a busy bus is "
+                  + "waited for with tBUF, and lost arbitration lets go and sets al");
     $finish(wrong ? 1 : 0);
   endrule
 endmodule

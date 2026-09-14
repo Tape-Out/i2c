@@ -42,6 +42,8 @@ regs:
     fields:
       - { name: irqf,  bits: "0:0", sw: r, hw: w, volatile: true }
       - { name: tip,   bits: "1:1", sw: r, hw: w, volatile: true }
+      # 3.1.8：仲裁输了。下一条起始命令清掉，与 OpenCores 的 AL 同位同义
+      - { name: al,    bits: "5:5", sw: r, hw: w, volatile: true }
       - { name: busy,  bits: "6:6", sw: r, hw: w, volatile: true }
       - { name: rxack, bits: "7:7", sw: r, hw: w, volatile: true }
   - name: saddr
