@@ -36,10 +36,10 @@ features:
     default: false
     area:
       points:
-        '1': 89.6
-        '2': 29.68
-        '4': 154.84
-        '8': 161.56
+        '1': 151.76
+        '2': -36.12
+        '4': 48.44
+        '8': 82.32
       per: fifoDepth
 test:
   unused:
@@ -65,10 +65,10 @@ deps:
 area:
   base:
     points:
-      '1': 1620.36
-      '2': 1839.32
-      '4': 2375.8
-      '8': 3277.68
+      '1': 1340.92
+      '2': 1661.8
+      '4': 2194.36
+      '8': 3008.6
     per: fifoDepth
   margin: 0.0227
   model: points-additive
@@ -82,39 +82,39 @@ area:
   - at:
       fifoDepth: 1
       slave: false
-    um2: 1620.36
+    um2: 1340.92
   - at:
       fifoDepth: 2
       slave: false
-    um2: 1839.32
+    um2: 1661.8
   - at:
       fifoDepth: 4
       slave: false
-    um2: 2375.8
+    um2: 2194.36
   - at:
       fifoDepth: 8
       slave: false
-    um2: 3277.68
+    um2: 3008.6
   - at:
       fifoDepth: 1
       slave: true
-    um2: 1709.96
+    um2: 1492.68
   - at:
       fifoDepth: 2
       slave: true
-    um2: 1869.0
+    um2: 1625.68
   - at:
       fifoDepth: 4
       slave: true
-    um2: 2530.64
+    um2: 2242.8
   - at:
       fifoDepth: 8
       slave: true
-    um2: 3439.24
+    um2: 3090.92
   corner:
     tool: ecc
     pdk: ics55
     freq_mhz: 100
-    measured: '2026-09-14'
+    measured: '2026-09-15'
     toolchain: bsc 2026.01 · yosys 0.68+195 · ecc 0.1.0a11
-    gen_digest: sha256:f913dc4ffe4fc9e7
+    gen_digest: sha256:007657d151263fe6

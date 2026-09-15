@@ -29,6 +29,21 @@ endinterface
 
 typedef enum { Idle, Start, Bit0, Ack, Stop } Phase deriving (Bits, Eq, FShow);
 
+// 一个位切五份，每份 presc + 1 拍（OpenCores 规范 3.2.1：the core uses a 5*SCL clock
+// internally，prescale = clk / (5·SCL) − 1）。原来切四份，软件照这个公式算出的 100 kHz
+// 实际跑成 125 kHz；而且四份里 SCL 低、高各两份，表 10 的 tLOW（快速模式 0.52 个位）
+// 与 tSU;STO（标准模式 0.40 个位）都凑不够。各相的份数：
+//   数据位与应答位 5：0～2 拉低 SCL（第 0 份开头换数据），3～4 放开，第 3 份末尾采样
+//   起始 8：0～2 重复起始时拉低 SCL、放开 SDA，3～5 两线都高（tSU;STA 0.6），6～7 拉低 SDA（tHD;STA 0.4）
+//   停止 6：0～2 拉低两线（tLOW 0.6），3～4 放开 SCL（tSU;STO 0.4），5 放开 SDA
+function Bit#(3) lastSlice(Phase p);
+  case (p)
+    Start:   return 7;
+    Stop:    return 5;
+    default: return 4;
+  endcase
+endfunction
+
 module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     provisos (Mul#(TDiv#(dw, 8), 8, dw), Add#(_a, 8, aw), Add#(_b, 16, dw),
               Add#(_c, 1, dw), Add#(_d, 8, dw), Add#(_e, 7, dw));
@@ -47,7 +62,7 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
 
   Reg#(Phase)     ph    <- mkConfigReg(Idle);
   Reg#(Bit#(16))  div   <- mkReg(0);
-  Reg#(Bit#(2))   quart <- mkReg(0);   // 一个位分四拍，好在中点采样
+  Reg#(Bit#(3))   slice <- mkReg(0);
   Reg#(Bit#(4))   bitn  <- mkReg(0);
   Reg#(Bit#(8))   sh    <- mkReg(0);
   Reg#(Bit#(1))   ackIn <- mkReg(1);
@@ -59,17 +74,19 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   // 规范说起始之后总线就忙、直到停止，不管是谁发的。它与「正在传一个字节」
   // 的 TIP 是两件事，原来两位驱动的是同一个表达式
   Reg#(Bool)      own   <- mkReg(False);
+  // 这一次起始是不是重复起始。受理那一拍 own 也在被置上，起始相里再看 own
+  // 分不出来，所以当场锁下
+  Reg#(Bool)      rep   <- mkReg(False);
   // 3.1.8：仲裁输了。下一条起始命令清掉，与 OpenCores 的 AL 同义
   Reg#(Bool)      al    <- mkReg(False);
 
   Wire#(Bit#(1)) sclIn <- mkBypassWire;
   Wire#(Bit#(1)) sdaIn <- mkBypassWire;
 
-  // 线上的起始与停止，不管是谁发的。freeCnt 是上一次起始或停止以来的拍数
+  // 线上的起始与停止，不管是谁发的
   Reg#(Bit#(1))   sclWas   <- mkReg(1);
   Reg#(Bit#(1))   sdaWas   <- mkReg(1);
   Reg#(Bool)      lineBusy <- mkReg(False);
-  Reg#(Bit#(17))  freeCnt  <- mkReg('1);
 
   Reg#(Bool) doAck   <- mkReg(False);
   // 命令要粘住：写方向取不到数就得等，而脉冲只有一拍，等一拍就丢了。
@@ -103,19 +120,11 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     sclWas <= sclIn;
     sdaWas <= sdaIn;
     Bool high = sclIn == 1 && sclWas == 1;
-    if (high && sdaWas == 1 && sdaIn == 0) begin
+    if (high && sdaWas == 1 && sdaIn == 0)
       lineBusy <= True;
-      freeCnt  <= 0;
-    end else if (high && sdaWas == 0 && sdaIn == 1) begin
+    else if (high && sdaWas == 0 && sdaIn == 1)
       lineBusy <= False;
-      freeCnt  <= 0;
-    end else if (freeCnt != '1)
-      freeCnt <= freeCnt + 1;
   endrule
-
-  // 3.1.8：总线空闲才许起始。停止之后先再空一个四分之一位，加上起始相前半的
-  // 两个四分之一位，tBUF 有 0.75 个位；不等这一下只有 0.5 个位，快速模式要 0.52
-  Bool busFree = !lineBusy && freeCnt > zeroExtend(r.presc);
 
   // 起始与写方向都要一个字节，读方向不要
   Bool needsData = r.cmd_start == 1 || r.cmd_wr == 1;
@@ -125,9 +134,11 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
   Bool anyCmd = r.cmd_start == 1 || r.cmd_wr == 1
                 || r.cmd_rd == 1 || r.cmd_stop == 1;
 
+  // 3.1.8：总线空闲才许起始。别的主控停止之后，起始相前六份 SDA 都是高的，
+  // tBUF 天然超过一个位，不必另外再等
   rule accept (ph == Idle && r.ctrl_en == 1 && cmdRdy[0]
                && (!needsData || txq.notEmpty)
-               && (r.cmd_start == 0 || own || busFree));
+               && (r.cmd_start == 0 || own || !lineBusy));
     cmdRdy[0] <= False;
     if (!anyCmd) begin
       // 只写了应答位：清标志，别的什么也不做
@@ -136,11 +147,12 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
       if (needsData) txq.deq;
       // 读的时候放手让从机驱动
       sh <= needsData ? txq.first : 8'hFF;
-      quart <= 0;
+      slice <= 0;
       div   <= r.presc;
       irqf  <= False;
       if (r.cmd_start == 1) begin
         ph     <= Start;
+        rep    <= own;
         own    <= True;
         al     <= False;
         rdDir  <= False;
@@ -161,22 +173,28 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
     end
   endrule
 
-  // 放开 SCL 的那几个四分之一拍里，线要是还低着，就是从机在按着不放。
-  // 规范允许从机这么做（3.1.9），主机必须等——时间不走。
-  Bool releasing = (ph == Start) || quart == 1 || quart == 2;
-  Bool stretched = releasing && sclIn == 0;
+  // 这一份里自己放开了 SCL
+  Bool sclFree = case (ph)
+                   Start: return !(rep && slice < 3);
+                   Bit0, Ack, Stop: return slice >= 3;
+                   default: return False;
+                 endcase;
+  // 放开 SCL 的那几份里线要是还低着，就是从机在按着不放。规范允许从机这么做
+  // （3.1.9），主机必须等——时间不走。
+  Bool stretched = sclFree && sclIn == 0;
 
   // 写方向上自己放手、想发 1 的那一位
   Bool sentHigh = ph == Bit0 && !rdDir && sh[7] == 1;
 
-  // 四分之一位一步：0 拉低 SCL 换数据，1 放开 SCL，2 采样，3 再拉低
   rule run (ph != Idle && r.ctrl_en == 1 && !stretched);
     if (div != 0)
       div <= div - 1;
     else begin
       div <= r.presc;
-      quart <= quart + 1;
-      if (quart == 2) begin
+      Bool last = slice == lastSlice(ph);
+      slice <= last ? 0 : slice + 1;
+      // 第 3 份末尾是 SCL 高段的中点
+      if (slice == 3) begin
         if (ph == Bit0 && rdDir) sh <= {sh[6:0], sdaIn};
         if (ph == Ack) ackIn <= sdaIn;
         // 3.1.8：想发 1，线上却是 0，仲裁输了。两根线立刻放开、回到空闲，
@@ -188,7 +206,7 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
           irqf <= True;
         end
       end
-      if (quart == 3) begin
+      if (last) begin
         case (ph)
           // 起始之后总是从第一位发起。原来不复位，前一个字节把计数留在 7，
           // 第二次起始只发一位就进应答：先写地址再重复起始去读，读的那一半就是坏的
@@ -230,24 +248,20 @@ module mkI2c#(I2cCfg cfg)(I2cIfc#(aw, dw, fifoDepth))
 
   interface regs = r.regs;
   interface I2cPins pins;
-    // 起始是 SCL 高时拉低 SDA，停止是 SCL 高时放开 SDA。
-    // 起始那一相整相不拉 SCL：原来 SDA 的下降与 SCL 的上升撞在同一个边界，
-    // 接收方根本看不到起始——规范要求 SDA 在 SCL 已经稳定为高时才下降。
-    // 三处「放开 SCL」：总线不归自己的时候 · 起始那一相全程 · 停止之后留在高位。
-    // 「总线还归自己就把 SCL 留在低位」这一条是必须的：原来每传完一个字节都回
-    // Idle 把 SCL 放回高位，下一个字节再拉低——从机看到的是多出来的一个时钟。
-    method Bit#(1) scl_pull =
-      ((ph == Idle && !own) || ph == Start || (ph == Stop && quart != 0)
-       || quart == 1 || quart == 2) ? 0 : 1;
+    // 总线不归自己时两根线都放开；归自己而空闲时把 SCL 留在低位——原来每传完
+    // 一个字节都回 Idle 把 SCL 放回高位，下一个字节再拉低，从机看到的是多出来的一个时钟
+    method Bit#(1) scl_pull = ((ph == Idle && own) || (ph != Idle && !sclFree)) ? 1 : 0;
     method Bit#(1) sda_pull;
       case (ph)
         Idle:  return 0;
-        Start: return (quart >= 2) ? 1 : 0;
+        // 起始是 SCL 高着的时候拉低 SDA：前六份放着、后两份拉低
+        Start: return (slice >= 6) ? 1 : 0;
         Bit0:  return (rdDir || sh[7] == 1) ? 0 : 1;
         // 读方向上 cmd.ack 说了要应答，主机就得把线拉低；不应答才放手。
         // 原来两个分支都落到「不是从机就放手」，于是主机永远发不出应答。
         Ack:   return rdDir ? (doAck ? 1 : 0) : (addressed ? 1 : 0);
-        Stop:  return (quart >= 2) ? 0 : 1;
+        // 停止是 SCL 高着的时候放开 SDA：最后一份才放
+        Stop:  return (slice < 5) ? 1 : 0;
       endcase
     endmethod
     method Action scl_in(Bit#(1) v); sclIn._write(v); endmethod
