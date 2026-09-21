@@ -176,7 +176,7 @@ import ConfigReg::*;
 import RegIf::*;
 import I2c::*;
 
-// 由 tb/mki2ctb.py 生成，勿手改。这一点：fifoDepth={depth} slave={slave}
+// 由 htest/mki2ctb.py 生成，勿手改。这一点：fifoDepth={depth} slave={slave}
 
 Bit#(8) rPRESC = 8'h00;
 Bit#(8) rCTRL  = 8'h04;
