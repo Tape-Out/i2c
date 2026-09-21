@@ -12,7 +12,7 @@ bus-neutral contracts in [`hwcore`](https://github.com/Tape-Out/hwcore), assembl
 ## Status
 
 Planned. What sits in this repository today is the retired picorv32-era Verilog, kept for
-provenance. The Bluespec rewrite against the [`spec`](https://github.com/Tape-Out/spec)
+provenance. The Bluespec rewrite against the [`spec`](https://github.com/Tape-Out/xrspec)
 contracts has not landed yet, and it will not reuse this source.
 
 ## Notes from the original
