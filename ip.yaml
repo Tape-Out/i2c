@@ -13,7 +13,7 @@ identity:
   ip_family: i2c
   integration_profile:
   - apb4-slave
-  maturity: planned
+  maturity: simulated
 contract:
   version: 1
   ctrl:
